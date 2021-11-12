@@ -9,11 +9,14 @@ type BufferState =
     | Partial
     | Empty
 
-type Settings = {
-    Levels : array<float>
-    MaxRates : array<float>
-    Buffers : array<BufferState>
-}
+type Settings =
+    {
+        Levels : array<float>
+        MaxRates : array<float>
+        Buffers : array<BufferState>
+    }
+
+
 
 // Parameters for generating test data
 let rng = Random (123)
@@ -124,10 +127,50 @@ let settingsKeys =
     testIndexes
     |> Array.map (fun idx -> settings.[idx])
     
-    
 // Create the dictionary for looking up Settings
 let settingsDictionary =
     settings
+    |> Array.mapi (fun i settings -> KeyValuePair (settings, i))
+    |> Dictionary
+    
+   
+[<CustomEquality; NoComparison>]
+type SettingsSimple =
+    {
+        Levels : array<float>
+        MaxRates : array<float>
+        Buffers : array<BufferState>
+    }
+    override this.Equals b =
+        match b with
+        | :? SettingsSimple as other ->
+            this.Levels = other.Levels
+            && this.MaxRates = other.MaxRates
+            && this.Buffers = other.Buffers
+        | _ -> false
+        
+    override this.GetHashCode () =
+        hash (this.Levels, this.MaxRates, this.Buffers)
+   
+// We now generate the random SimpleSettings we will be using
+let settingsSimple =
+    seq {
+        for vi in valueIndexes ->
+        {
+            Levels = levels.[vi.LevelsIdx]
+            MaxRates = maxRates.[vi.MaxRatesIdx]
+            Buffers = buffers.[vi.BufferStatesIdx]
+        } : SettingsSimple
+    } |> Array.ofSeq
+   
+// The values we will test looking up in a Dictionary
+let settingsSimpleKeys =
+    testIndexes
+    |> Array.map (fun idx -> settingsSimple.[idx])
+    
+// Create the dictionary for looking up Settings
+let settingsSimpleDictionary =
+    settingsSimple
     |> Array.mapi (fun i settings -> KeyValuePair (settings, i))
     |> Dictionary
     
@@ -147,6 +190,21 @@ type Benchmarks () =
             idx <- idx + 1
 
         result
+        
+    [<Benchmark>]
+    member _.Simple () =
+        let mutable idx = 0
+        let mutable result = 0
+
+        while idx < settingsSimpleKeys.Length do
+            let testKey = settingsSimpleKeys.[idx]
+            result <- settingsSimpleDictionary.[testKey]
+
+            idx <- idx + 1
+
+        result
+    
+    
     
     
 [<EntryPoint>]

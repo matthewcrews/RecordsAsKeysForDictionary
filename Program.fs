@@ -1,5 +1,8 @@
 ﻿open System
 open System.Collections.Generic
+open FSharp.NativeInterop
+open System.Runtime.Intrinsics.X86
+open System.Runtime.Intrinsics
 open BenchmarkDotNet.Attributes
 open BenchmarkDotNet.Running
 
@@ -295,6 +298,357 @@ module FloatHashShort =
         settings
         |> Array.mapi (fun i settings -> KeyValuePair (settings, i))
         |> Dictionary
+
+module ArrayEquals =
+
+    let defaultHashNodes = 18
+    let inline HashCombine nr x y = (x <<< 1) + y + 631 * nr
+    
+    let HashFloatArray (x: array<float>) : int =
+        let len = x.Length
+        let mutable i = len - 1
+        if i > defaultHashNodes then i <- defaultHashNodes // limit the hash
+        let mutable acc = 0
+        while (i >= 0) do 
+              acc <- HashCombine i acc (int x.[i])
+              i <- i - 1
+        acc
+          
+    let FloatArrayEquals (a: array<float>) (b: array<float>) =
+        if a.Length <> b.Length then
+            invalidArg (nameof b) "Cannot check equality on arrays of different lengths"
+            
+        let mutable idx = 0
+        let mutable result = true
+        
+        // Use a while loop to create better assembly
+        while idx < a.Length && result do
+            if a.[idx] <> b.[idx] then
+                result <- false
+                
+            idx <- idx + 1
+            
+        result
+      
+      
+    [<CustomEquality; NoComparison>]
+    type Settings =
+        {
+            Levels : array<float>
+            MaxRates : array<float>
+            Buffers : array<BufferState>
+        }
+        override this.Equals b =
+            match b with
+            | :? Settings as other ->
+                (FloatArrayEquals this.Levels other.Levels)
+                && (FloatArrayEquals this.MaxRates other.MaxRates)
+                && this.Buffers = other.Buffers
+            | _ -> false
+            
+        override this.GetHashCode () =
+            let levelsHash = HashFloatArray this.Levels
+            let maxRatesHash = HashFloatArray this.MaxRates
+            let buffersHash = this.Buffers.GetHashCode()
+            hash (levelsHash, maxRatesHash, buffersHash)
+        
+    // We now generate the random SimpleSettings we will be using
+    let settings =
+        seq {
+            for vi in valueIndexes ->
+            {
+                Levels = levels.[vi.LevelsIdx]
+                MaxRates = maxRates.[vi.MaxRatesIdx]
+                Buffers = buffers.[vi.BufferStatesIdx]
+            }
+        } |> Array.ofSeq
+       
+    // The values we will test looking up in a Dictionary
+    let settingsKeys =
+        testIndexes
+        |> Array.map (fun idx -> settings.[idx])
+        
+    // Create the dictionary for looking up Settings
+    let settingsDictionary =
+        settings
+        |> Array.mapi (fun i settings -> KeyValuePair (settings, i))
+        |> Dictionary 
+    
+    
+module SseFloatArrayEquals =
+
+    let defaultHashNodes = 18
+    let inline HashCombine nr x y = (x <<< 1) + y + 631 * nr
+    
+    let HashFloatArray (x: array<float>) : int =
+        let len = x.Length
+        let mutable i = len - 1
+        if i > defaultHashNodes then i <- defaultHashNodes // limit the hash
+        let mutable acc = 0
+        while (i >= 0) do 
+              acc <- HashCombine i acc (int x.[i])
+              i <- i - 1
+        acc
+          
+    let SseFloatArrayEquals (a: array<float>) (b: array<float>) =
+        if a.Length <> b.Length then
+            invalidArg (nameof b) "Cannot check equality on arrays of different lengths"
+        
+        let mutable result = true
+        let mutable idx = 0
+        
+        if a.Length > 1 then
+            let lastBlockIdx = a.Length - (a.Length % Vector128<float>.Count)
+            let aSpan = a.AsSpan ()
+            let bSpan = b.AsSpan ()
+            let aPointer = && (aSpan.GetPinnableReference ())
+            let bPointer = && (bSpan.GetPinnableReference ())
+
+            while idx < lastBlockIdx && result do
+                let aVector = Sse2.LoadVector128 (NativePtr.add aPointer idx)
+                let bVector = Sse2.LoadVector128 (NativePtr.add bPointer idx)
+                let comparison = Sse2.CompareEqual (aVector, bVector)
+                let mask = Sse2.MoveMask comparison
+                if mask <> 0x3 then
+                    result <- false
+
+                idx <- idx + Vector128.Count
+
+        while idx < a.Length && result do
+            if a.[idx] <> b.[idx] then
+                result <- false
+
+            idx <- idx + 1
+
+        result
+        
+    [<CustomEquality; NoComparison>]
+    type Settings =
+        {
+            Levels : array<float>
+            MaxRates : array<float>
+            Buffers : array<BufferState>
+        }
+        override this.Equals b =
+            match b with
+            | :? Settings as other ->
+                (SseFloatArrayEquals this.Levels other.Levels)
+                && (SseFloatArrayEquals this.MaxRates other.MaxRates)
+                && this.Buffers = other.Buffers
+            | _ -> false
+            
+        override this.GetHashCode () =
+            let levelsHash = HashFloatArray this.Levels
+            let maxRatesHash = HashFloatArray this.MaxRates
+            let buffersHash = this.Buffers.GetHashCode()
+            hash (levelsHash, maxRatesHash, buffersHash)
+        
+    // We now generate the random SimpleSettings we will be using
+    let settings =
+        seq {
+            for vi in valueIndexes ->
+            {
+                Levels = levels.[vi.LevelsIdx]
+                MaxRates = maxRates.[vi.MaxRatesIdx]
+                Buffers = buffers.[vi.BufferStatesIdx]
+            }
+        } |> Array.ofSeq
+       
+    // The values we will test looking up in a Dictionary
+    let settingsKeys =
+        testIndexes
+        |> Array.map (fun idx -> settings.[idx])
+        
+    // Create the dictionary for looking up Settings
+    let settingsDictionary =
+        settings
+        |> Array.mapi (fun i settings -> KeyValuePair (settings, i))
+        |> Dictionary 
+
+   
+module AvxFloatArrayEquals =
+
+    let defaultHashNodes = 18
+    let inline HashCombine nr x y = (x <<< 1) + y + 631 * nr
+    
+    let HashFloatArray (x: array<float>) : int =
+        let len = x.Length
+        let mutable i = len - 1
+        if i > defaultHashNodes then i <- defaultHashNodes // limit the hash
+        let mutable acc = 0
+        while (i >= 0) do 
+              acc <- HashCombine i acc (int x.[i])
+              i <- i - 1
+        acc
+          
+    let AvxFloatArrayEquals (a: array<float>) (b: array<float>) =
+        if a.Length <> b.Length then
+            invalidArg (nameof b) "Cannot check equality on arrays of different lengths"
+        
+        let mutable result = true
+        let mutable idx = 0
+        
+        if a.Length > 3 then
+            let lastBlockIdx = a.Length - (a.Length % Vector256<float>.Count)
+            let aSpan = a.AsSpan ()
+            let bSpan = b.AsSpan ()
+            let aPointer = && (aSpan.GetPinnableReference ())
+            let bPointer = && (bSpan.GetPinnableReference ())
+
+            while idx < lastBlockIdx && result do
+                let aVector = Avx2.LoadVector256 (NativePtr.add aPointer idx)
+                let bVector = Avx2.LoadVector256 (NativePtr.add bPointer idx)
+                let comparison = Avx2.CompareEqual (aVector, bVector)
+                let mask = Avx2.MoveMask comparison
+                if mask <> 0xF then
+                    result <- false
+
+                idx <- idx + Vector128.Count
+
+        while idx < a.Length && result do
+            if a.[idx] <> b.[idx] then
+                result <- false
+
+            idx <- idx + 1
+
+        result
+       
+      
+    [<CustomEquality; NoComparison>]
+    type Settings =
+        {
+            Levels : array<float>
+            MaxRates : array<float>
+            Buffers : array<BufferState>
+        }
+        override this.Equals b =
+            match b with
+            | :? Settings as other ->
+                (AvxFloatArrayEquals this.Levels other.Levels)
+                && (AvxFloatArrayEquals this.MaxRates other.MaxRates)
+                && this.Buffers = other.Buffers
+            | _ -> false
+            
+        override this.GetHashCode () =
+            let levelsHash = HashFloatArray this.Levels
+            let maxRatesHash = HashFloatArray this.MaxRates
+            let buffersHash = this.Buffers.GetHashCode()
+            hash (levelsHash, maxRatesHash, buffersHash)
+        
+    // We now generate the random SimpleSettings we will be using
+    let settings =
+        seq {
+            for vi in valueIndexes ->
+            {
+                Levels = levels.[vi.LevelsIdx]
+                MaxRates = maxRates.[vi.MaxRatesIdx]
+                Buffers = buffers.[vi.BufferStatesIdx]
+            }
+        } |> Array.ofSeq
+       
+    // The values we will test looking up in a Dictionary
+    let settingsKeys =
+        testIndexes
+        |> Array.map (fun idx -> settings.[idx])
+        
+    // Create the dictionary for looking up Settings
+    let settingsDictionary =
+        settings
+        |> Array.mapi (fun i settings -> KeyValuePair (settings, i))
+        |> Dictionary 
+    
+    
+module AvxByteArrayEquals =
+
+    let defaultHashNodes = 18
+    let inline HashCombine nr x y = (x <<< 1) + y + 631 * nr
+    
+    let HashFloatArray (x: array<float>) : int =
+        let len = x.Length
+        let mutable i = len - 1
+        if i > defaultHashNodes then i <- defaultHashNodes // limit the hash
+        let mutable acc = 0
+        while (i >= 0) do 
+              acc <- HashCombine i acc (int x.[i])
+              i <- i - 1
+        acc
+          
+    let AvxFloatArrayEquals (a: array<float>) (b: array<float>) =
+        if a.Length <> b.Length then
+            invalidArg (nameof b) "Cannot check equality on arrays of different lengths"
+        
+        let mutable result = true
+        let mutable idx = 0
+        
+        if a.Length > 1 then
+            let lastBlockIdx = a.Length - (a.Length % Vector256<float>.Count)
+            let aSpan = a.AsSpan ()
+            let bSpan = b.AsSpan ()
+            let aPointer = && (aSpan.GetPinnableReference ())
+            let bPointer = && (bSpan.GetPinnableReference ())
+
+            while idx < lastBlockIdx && result do
+                let aVector = Avx2.LoadVector256 (NativePtr.add aPointer idx)
+                let bVector = Avx2.LoadVector256 (NativePtr.add bPointer idx)
+                let comparison = Avx2.CompareEqual (aVector, bVector)
+                let mask = Avx2.MoveMask comparison
+                if mask <> 0xF then
+                    result <- false
+
+                idx <- idx + Vector128.Count
+
+        while idx < a.Length && result do
+            if a.[idx] <> b.[idx] then
+                result <- false
+
+            idx <- idx + 1
+
+        result
+       
+      
+    [<CustomEquality; NoComparison>]
+    type Settings =
+        {
+            Levels : array<float>
+            MaxRates : array<float>
+            Buffers : array<BufferState>
+        }
+        override this.Equals b =
+            match b with
+            | :? Settings as other ->
+                (AvxFloatArrayEquals this.Levels other.Levels)
+                && (AvxFloatArrayEquals this.MaxRates other.MaxRates)
+                && this.Buffers = other.Buffers
+            | _ -> false
+            
+        override this.GetHashCode () =
+            let levelsHash = HashFloatArray this.Levels
+            let maxRatesHash = HashFloatArray this.MaxRates
+            let buffersHash = this.Buffers.GetHashCode()
+            hash (levelsHash, maxRatesHash, buffersHash)
+        
+    // We now generate the random SimpleSettings we will be using
+    let settings =
+        seq {
+            for vi in valueIndexes ->
+            {
+                Levels = levels.[vi.LevelsIdx]
+                MaxRates = maxRates.[vi.MaxRatesIdx]
+                Buffers = buffers.[vi.BufferStatesIdx]
+            }
+        } |> Array.ofSeq
+       
+    // The values we will test looking up in a Dictionary
+    let settingsKeys =
+        testIndexes
+        |> Array.map (fun idx -> settings.[idx])
+        
+    // Create the dictionary for looking up Settings
+    let settingsDictionary =
+        settings
+        |> Array.mapi (fun i settings -> KeyValuePair (settings, i))
+        |> Dictionary 
+    
         
 // Type to contain our performance tests
 type Benchmarks () =
@@ -350,6 +704,46 @@ type Benchmarks () =
             idx <- idx + 1
 
         result
+        
+    [<Benchmark>]
+    member _.ArrayEquals () =
+        let mutable idx = 0
+        let mutable result = 0
+
+        while idx < ArrayEquals.settingsKeys.Length do
+            let testKey = ArrayEquals.settingsKeys.[idx]
+            result <- ArrayEquals.settingsDictionary.[testKey]
+
+            idx <- idx + 1
+
+        result
+        
+    [<Benchmark>]
+    member _.SseFloatArrayEquals () =
+        let mutable idx = 0
+        let mutable result = 0
+
+        while idx < SseFloatArrayEquals.settingsKeys.Length do
+            let testKey = SseFloatArrayEquals.settingsKeys.[idx]
+            result <- SseFloatArrayEquals.settingsDictionary.[testKey]
+
+            idx <- idx + 1
+
+        result
+        
+    [<Benchmark>]
+    member _.AvxFloatArrayEquals () =
+        let mutable idx = 0
+        let mutable result = 0
+
+        while idx < AvxFloatArrayEquals.settingsKeys.Length do
+            let testKey = AvxFloatArrayEquals.settingsKeys.[idx]
+            result <- AvxFloatArrayEquals.settingsDictionary.[testKey]
+
+            idx <- idx + 1
+
+        result
+    
     
     
     
@@ -358,6 +752,7 @@ type Benchmarks () =
 let main argv =  
     
     let summary = BenchmarkRunner.Run<Benchmarks>()
-    
+//    let x = Benchmarks()
+//    x.AvxFloatArrayEquals()
     0
 

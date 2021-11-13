@@ -9,13 +9,6 @@ type BufferState =
     | Partial
     | Empty
 
-type Settings =
-    {
-        Levels : array<float>
-        MaxRates : array<float>
-        Buffers : array<BufferState>
-    }
-
 
 
 // Parameters for generating test data
@@ -102,17 +95,6 @@ let valueIndexes =
         |}
     } |> Array.ofSeq
     
-// We now generate the random Settings we will be using
-let settings =
-    seq {
-        for vi in valueIndexes ->
-        {
-            Levels = levels.[vi.LevelsIdx]
-            MaxRates = maxRates.[vi.MaxRatesIdx]
-            Buffers = buffers.[vi.BufferStatesIdx]
-        }
-    } |> Array.ofSeq
-    
 // These will be the indices for deciding which Settings values we
 // will look up in each of the dictionary. We want to ensure we are
 // looking up equivalent data in all the tests.
@@ -122,59 +104,198 @@ let testIndexes =
             rng.Next (0, randomSettingsCount)
     } |> Array.ofSeq
 
-// The values we will test looking up in a Dictionary
-let settingsKeys =
-    testIndexes
-    |> Array.map (fun idx -> settings.[idx])
+// Types and data for the default F# behavior
+module Default =
     
-// Create the dictionary for looking up Settings
-let settingsDictionary =
-    settings
-    |> Array.mapi (fun i settings -> KeyValuePair (settings, i))
-    |> Dictionary
-    
-   
-[<CustomEquality; NoComparison>]
-type SettingsSimple =
-    {
-        Levels : array<float>
-        MaxRates : array<float>
-        Buffers : array<BufferState>
-    }
-    override this.Equals b =
-        match b with
-        | :? SettingsSimple as other ->
-            this.Levels = other.Levels
-            && this.MaxRates = other.MaxRates
-            && this.Buffers = other.Buffers
-        | _ -> false
-        
-    override this.GetHashCode () =
-        hash (this.Levels, this.MaxRates, this.Buffers)
-   
-// We now generate the random SimpleSettings we will be using
-let settingsSimple =
-    seq {
-        for vi in valueIndexes ->
+    type Settings =
         {
-            Levels = levels.[vi.LevelsIdx]
-            MaxRates = maxRates.[vi.MaxRatesIdx]
-            Buffers = buffers.[vi.BufferStatesIdx]
-        } : SettingsSimple
-    } |> Array.ofSeq
-   
-// The values we will test looking up in a Dictionary
-let settingsSimpleKeys =
-    testIndexes
-    |> Array.map (fun idx -> settingsSimple.[idx])
+            Levels : array<float>
+            MaxRates : array<float>
+            Buffers : array<BufferState>
+        }
     
-// Create the dictionary for looking up Settings
-let settingsSimpleDictionary =
-    settingsSimple
-    |> Array.mapi (fun i settings -> KeyValuePair (settings, i))
-    |> Dictionary
+    // We now generate the random Settings we will be using
+    let settings =
+        seq {
+            for vi in valueIndexes ->
+            {
+                Levels = levels.[vi.LevelsIdx]
+                MaxRates = maxRates.[vi.MaxRatesIdx]
+                Buffers = buffers.[vi.BufferStatesIdx]
+            }
+        } |> Array.ofSeq
+
+
+    // The values we will test looking up in a Dictionary
+    let settingsKeys =
+        testIndexes
+        |> Array.map (fun idx -> settings.[idx])
+        
+    // Create the dictionary for looking up Settings
+    let settingsDictionary =
+        settings
+        |> Array.mapi (fun i settings -> KeyValuePair (settings, i))
+        |> Dictionary
     
+// Types and data for the Simple overrides
+module Simple =
+       
+    [<CustomEquality; NoComparison>]
+    type Settings =
+        {
+            Levels : array<float>
+            MaxRates : array<float>
+            Buffers : array<BufferState>
+        }
+        override this.Equals b =
+            match b with
+            | :? Settings as other ->
+                this.Levels = other.Levels
+                && this.MaxRates = other.MaxRates
+                && this.Buffers = other.Buffers
+            | _ -> false
+            
+        override this.GetHashCode () =
+            hash (this.Levels, this.MaxRates, this.Buffers)
+       
+    // We now generate the random SimpleSettings we will be using
+    let settings =
+        seq {
+            for vi in valueIndexes ->
+            {
+                Levels = levels.[vi.LevelsIdx]
+                MaxRates = maxRates.[vi.MaxRatesIdx]
+                Buffers = buffers.[vi.BufferStatesIdx]
+            }
+        } |> Array.ofSeq
+       
+    // The values we will test looking up in a Dictionary
+    let settingsKeys =
+        testIndexes
+        |> Array.map (fun idx -> settings.[idx])
+        
+    // Create the dictionary for looking up Settings
+    let settingsDictionary =
+        settings
+        |> Array.mapi (fun i settings -> KeyValuePair (settings, i))
+        |> Dictionary
+        
     
+module FloatHash =
+    
+    let inline HashCombine nr x y = (x <<< 1) + y + 631 * nr
+    
+    let HashFloatArray (x: array<float>) : int =
+          let len = x.Length
+          let mutable i = len - 1 
+          let mutable acc = 0
+          while (i >= 0) do 
+              acc <- HashCombine i acc (int x.[i])
+              i <- i - 1
+          acc
+          
+    [<CustomEquality; NoComparison>]
+    type Settings =
+        {
+            Levels : array<float>
+            MaxRates : array<float>
+            Buffers : array<BufferState>
+        }
+        override this.Equals b =
+            match b with
+            | :? Settings as other ->
+                this.Levels = other.Levels
+                && this.MaxRates = other.MaxRates
+                && this.Buffers = other.Buffers
+            | _ -> false
+            
+        override this.GetHashCode () =
+            let levelsHash = HashFloatArray this.Levels
+            let maxRatesHash = HashFloatArray this.MaxRates
+            let buffersHash = this.Buffers.GetHashCode()
+            hash (levelsHash, maxRatesHash, buffersHash)
+            
+    // We now generate the random SimpleSettings we will be using
+    let settings =
+        seq {
+            for vi in valueIndexes ->
+            {
+                Levels = levels.[vi.LevelsIdx]
+                MaxRates = maxRates.[vi.MaxRatesIdx]
+                Buffers = buffers.[vi.BufferStatesIdx]
+            }
+        } |> Array.ofSeq
+       
+    // The values we will test looking up in a Dictionary
+    let settingsKeys =
+        testIndexes
+        |> Array.map (fun idx -> settings.[idx])
+        
+    // Create the dictionary for looking up Settings
+    let settingsDictionary =
+        settings
+        |> Array.mapi (fun i settings -> KeyValuePair (settings, i))
+        |> Dictionary
+  
+  
+module FloatHashShort =
+    
+    let defaultHashNodes = 18
+    let inline HashCombine nr x y = (x <<< 1) + y + 631 * nr
+    
+    let HashFloatArray (x: array<float>) : int =
+          let len = x.Length
+          let mutable i = len - 1
+          if i > defaultHashNodes then i <- defaultHashNodes // limit the hash
+          let mutable acc = 0
+          while (i >= 0) do 
+              acc <- HashCombine i acc (int x.[i])
+              i <- i - 1
+          acc
+          
+    [<CustomEquality; NoComparison>]
+    type Settings =
+        {
+            Levels : array<float>
+            MaxRates : array<float>
+            Buffers : array<BufferState>
+        }
+        override this.Equals b =
+            match b with
+            | :? Settings as other ->
+                this.Levels = other.Levels
+                && this.MaxRates = other.MaxRates
+                && this.Buffers = other.Buffers
+            | _ -> false
+            
+        override this.GetHashCode () =
+            let levelsHash = HashFloatArray this.Levels
+            let maxRatesHash = HashFloatArray this.MaxRates
+            let buffersHash = this.Buffers.GetHashCode()
+            hash (levelsHash, maxRatesHash, buffersHash)
+            
+    // We now generate the random SimpleSettings we will be using
+    let settings =
+        seq {
+            for vi in valueIndexes ->
+            {
+                Levels = levels.[vi.LevelsIdx]
+                MaxRates = maxRates.[vi.MaxRatesIdx]
+                Buffers = buffers.[vi.BufferStatesIdx]
+            }
+        } |> Array.ofSeq
+       
+    // The values we will test looking up in a Dictionary
+    let settingsKeys =
+        testIndexes
+        |> Array.map (fun idx -> settings.[idx])
+        
+    // Create the dictionary for looking up Settings
+    let settingsDictionary =
+        settings
+        |> Array.mapi (fun i settings -> KeyValuePair (settings, i))
+        |> Dictionary
+        
 // Type to contain our performance tests
 type Benchmarks () =
 
@@ -183,9 +304,9 @@ type Benchmarks () =
         let mutable idx = 0
         let mutable result = 0
 
-        while idx < settingsKeys.Length do
-            let testKey = settingsKeys.[idx]
-            result <- settingsDictionary.[testKey]
+        while idx < Default.settingsKeys.Length do
+            let testKey = Default.settingsKeys.[idx]
+            result <- Default.settingsDictionary.[testKey]
 
             idx <- idx + 1
 
@@ -196,9 +317,35 @@ type Benchmarks () =
         let mutable idx = 0
         let mutable result = 0
 
-        while idx < settingsSimpleKeys.Length do
-            let testKey = settingsSimpleKeys.[idx]
-            result <- settingsSimpleDictionary.[testKey]
+        while idx < Simple.settingsKeys.Length do
+            let testKey = Simple.settingsKeys.[idx]
+            result <- Simple.settingsDictionary.[testKey]
+
+            idx <- idx + 1
+
+        result
+        
+    [<Benchmark>]
+    member _.FloatHash () =
+        let mutable idx = 0
+        let mutable result = 0
+
+        while idx < FloatHash.settingsKeys.Length do
+            let testKey = FloatHash.settingsKeys.[idx]
+            result <- FloatHash.settingsDictionary.[testKey]
+
+            idx <- idx + 1
+
+        result
+        
+    [<Benchmark>]
+    member _.FloatHashShort () =
+        let mutable idx = 0
+        let mutable result = 0
+
+        while idx < FloatHashShort.settingsKeys.Length do
+            let testKey = FloatHashShort.settingsKeys.[idx]
+            result <- FloatHashShort.settingsDictionary.[testKey]
 
             idx <- idx + 1
 

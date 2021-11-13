@@ -6,7 +6,6 @@ open System.Runtime.Intrinsics
 open BenchmarkDotNet.Attributes
 open BenchmarkDotNet.Running
 
-
 type BufferState =
     | Full
     | Partial
@@ -397,20 +396,17 @@ module SseFloatArrayEquals =
         let mutable result = true
         let mutable idx = 0
         
-        if a.Length > 1 then
+        if a.Length >= Vector128<float>.Count then
             let lastBlockIdx = a.Length - (a.Length % Vector128<float>.Count)
-            let aSpan = a.AsSpan ()
-            let bSpan = b.AsSpan ()
-            let aPointer = && (aSpan.GetPinnableReference ())
-            let bPointer = && (bSpan.GetPinnableReference ())
+            use aPointer = fixed a
+            use bPointer = fixed b
 
             while idx < lastBlockIdx && result do
                 let aVector = Sse2.LoadVector128 (NativePtr.add aPointer idx)
                 let bVector = Sse2.LoadVector128 (NativePtr.add bPointer idx)
                 let comparison = Sse2.CompareEqual (aVector, bVector)
                 let mask = Sse2.MoveMask comparison
-                if mask <> 0x3 then
-                    result <- false
+                result <- (mask = 3)
 
                 idx <- idx + Vector128.Count
 
@@ -465,13 +461,13 @@ module SseFloatArrayEquals =
         |> Array.mapi (fun i settings -> KeyValuePair (settings, i))
         |> Dictionary 
 
-   
-module AvxFloatArrayEquals =
+    
+module SseByteArrayEquals =
 
-    let defaultHashNodes = 18
+    let private defaultHashNodes = 18
     let inline HashCombine nr x y = (x <<< 1) + y + 631 * nr
     
-    let HashFloatArray (x: array<float>) : int =
+    let private HashFloatArray (x: array<float>) : int =
         let len = x.Length
         let mutable i = len - 1
         if i > defaultHashNodes then i <- defaultHashNodes // limit the hash
@@ -480,53 +476,58 @@ module AvxFloatArrayEquals =
               acc <- HashCombine i acc (int x.[i])
               i <- i - 1
         acc
-          
-    let AvxFloatArrayEquals (a: array<float>) (b: array<float>) =
+
+
+    let private equals<'T when 'T : unmanaged> (a: array<'T>) (b: array<'T>) =
         if a.Length <> b.Length then
-            invalidArg (nameof b) "Cannot check equality on arrays of different lengths"
+            invalidArg (nameof b) "Cannot perform equals on arrays of different lengths"
         
+        let len = a.Length * sizeof<'T> / sizeof<byte>
+        use pointerA = fixed a
+        let bytePointerA = pointerA |> NativePtr.toNativeInt |> NativePtr.ofNativeInt<byte>
+        use pointerB = fixed b
+        let bytePointerB = pointerB |> NativePtr.toNativeInt |> NativePtr.ofNativeInt<byte>
         let mutable result = true
         let mutable idx = 0
-        
-        if a.Length > 3 then
-            let lastBlockIdx = a.Length - (a.Length % Vector256<float>.Count)
-            let aSpan = a.AsSpan ()
-            let bSpan = b.AsSpan ()
-            let aPointer = && (aSpan.GetPinnableReference ())
-            let bPointer = && (bSpan.GetPinnableReference ())
 
-            while idx < lastBlockIdx && result do
-                let aVector = Avx2.LoadVector256 (NativePtr.add aPointer idx)
-                let bVector = Avx2.LoadVector256 (NativePtr.add bPointer idx)
-                let comparison = Avx2.CompareEqual (aVector, bVector)
-                let mask = Avx2.MoveMask comparison
-                if mask <> 0xF then
-                    result <- false
+        if len > Vector128<byte>.Count then
+            let lastBlockIdx = len - (len % Vector128<byte>.Count)
 
-                idx <- idx + Vector128.Count
+            while idx <lastBlockIdx && result do
+                let aVector = Sse2.LoadVector128 (NativePtr.add bytePointerA idx)
+                let bVector = Sse2.LoadVector128 (NativePtr.add bytePointerB idx)
 
-        while idx < a.Length && result do
-            if a.[idx] <> b.[idx] then
-                result <- false
+                let comparison = Sse2.CompareEqual (aVector, bVector)
+                let mask = Sse2.MoveMask (comparison)
 
+                result <- (mask = 65535)
+                idx <- idx + Vector128<byte>.Count
+
+        while idx < len && result do
+            result <- ((NativePtr.get bytePointerA idx) = (NativePtr.get bytePointerB idx))
             idx <- idx + 1
 
         result
-       
+
+    [<Struct>]
+    type BufferStateStruct =
+        | Full
+        | Partial
+        | Empty
       
     [<CustomEquality; NoComparison>]
     type Settings =
         {
             Levels : array<float>
             MaxRates : array<float>
-            Buffers : array<BufferState>
+            Buffers : array<BufferStateStruct>
         }
         override this.Equals b =
             match b with
             | :? Settings as other ->
-                (AvxFloatArrayEquals this.Levels other.Levels)
-                && (AvxFloatArrayEquals this.MaxRates other.MaxRates)
-                && this.Buffers = other.Buffers
+                (equals this.Levels other.Levels)
+                && (equals this.MaxRates other.MaxRates)
+                && (equals this.Buffers other.Buffers)
             | _ -> false
             
         override this.GetHashCode () =
@@ -534,6 +535,18 @@ module AvxFloatArrayEquals =
             let maxRatesHash = HashFloatArray this.MaxRates
             let buffersHash = this.Buffers.GetHashCode()
             hash (levelsHash, maxRatesHash, buffersHash)
+        
+    let buffers =
+        buffers
+        |> Array.map (fun x ->
+            x
+            |> Array.map (fun b ->
+                match b with
+                | BufferState.Empty -> BufferStateStruct.Empty
+                | BufferState.Full -> BufferStateStruct.Full
+                | BufferState.Partial -> BufferStateStruct.Partial
+                )
+            )
         
     // We now generate the random SimpleSettings we will be using
     let settings =
@@ -557,13 +570,13 @@ module AvxFloatArrayEquals =
         |> Array.mapi (fun i settings -> KeyValuePair (settings, i))
         |> Dictionary 
     
-    
+       
 module AvxByteArrayEquals =
 
-    let defaultHashNodes = 18
+    let private defaultHashNodes = 18
     let inline HashCombine nr x y = (x <<< 1) + y + 631 * nr
     
-    let HashFloatArray (x: array<float>) : int =
+    let private HashFloatArray (x: array<float>) : int =
         let len = x.Length
         let mutable i = len - 1
         if i > defaultHashNodes then i <- defaultHashNodes // limit the hash
@@ -573,52 +586,64 @@ module AvxByteArrayEquals =
               i <- i - 1
         acc
           
-    let AvxFloatArrayEquals (a: array<float>) (b: array<float>) =
-        if a.Length <> b.Length then
-            invalidArg (nameof b) "Cannot check equality on arrays of different lengths"
-        
+    let private auxEquals (a: (nativeptr<byte> * int)) (b: (nativeptr<byte> * int)) =
         let mutable result = true
         let mutable idx = 0
-        
-        if a.Length > 1 then
-            let lastBlockIdx = a.Length - (a.Length % Vector256<float>.Count)
-            let aSpan = a.AsSpan ()
-            let bSpan = b.AsSpan ()
-            let aPointer = && (aSpan.GetPinnableReference ())
-            let bPointer = && (bSpan.GetPinnableReference ())
 
-            while idx < lastBlockIdx && result do
-                let aVector = Avx2.LoadVector256 (NativePtr.add aPointer idx)
-                let bVector = Avx2.LoadVector256 (NativePtr.add bPointer idx)
+        let (ptrA: nativeptr<byte>, lenA : int) = a
+        let (ptrB: nativeptr<byte>, lenB : int) = b
+
+        if lenA > Vector256<byte>.Count then
+            let lastBlockIdx = lenA - (lenA % Vector256<byte>.Count)
+
+            while idx <lastBlockIdx && result do
+                let aVector = Avx2.LoadVector256 (NativePtr.add ptrA idx)
+                let bVector = Avx2.LoadVector256 (NativePtr.add ptrB idx)
+
                 let comparison = Avx2.CompareEqual (aVector, bVector)
-                let mask = Avx2.MoveMask comparison
-                if mask <> 0xF then
-                    result <- false
+                let mask = Avx2.MoveMask (comparison)
 
-                idx <- idx + Vector128.Count
+                result <- (mask = -1) // Two's Complement
+                idx <- idx + Vector256<byte>.Count
 
-        while idx < a.Length && result do
-            if a.[idx] <> b.[idx] then
-                result <- false
-
+        while idx < lenA && idx < lenB && result do
+            result <- ((NativePtr.get ptrA idx) = (NativePtr.get ptrB idx))
             idx <- idx + 1
 
         result
-       
+
+
+    let private equals<'T when 'T : unmanaged> (a: array<'T>) (b: array<'T>) =
+        if (a.Length <> b.Length) then
+            false
+        else
+            let ptrA = && (a.AsSpan().GetPinnableReference()) |> NativePtr.toNativeInt |> NativePtr.ofNativeInt<byte>
+            let lenA = a.Length * sizeof<'T> / sizeof<byte>
+
+            let ptrB = && (b.AsSpan().GetPinnableReference()) |> NativePtr.toNativeInt |> NativePtr.ofNativeInt<byte>
+            let lenB = b.Length * sizeof<'T> / sizeof<byte>
+
+            auxEquals (ptrA, lenA) (ptrB, lenB)
+
+    [<Struct>]
+    type BufferStateStruct =
+        | Full
+        | Partial
+        | Empty
       
     [<CustomEquality; NoComparison>]
     type Settings =
         {
             Levels : array<float>
             MaxRates : array<float>
-            Buffers : array<BufferState>
+            Buffers : array<BufferStateStruct>
         }
         override this.Equals b =
             match b with
             | :? Settings as other ->
-                (AvxFloatArrayEquals this.Levels other.Levels)
-                && (AvxFloatArrayEquals this.MaxRates other.MaxRates)
-                && this.Buffers = other.Buffers
+                (equals this.Levels other.Levels)
+                && (equals this.MaxRates other.MaxRates)
+                && (equals this.Buffers other.Buffers)
             | _ -> false
             
         override this.GetHashCode () =
@@ -626,6 +651,18 @@ module AvxByteArrayEquals =
             let maxRatesHash = HashFloatArray this.MaxRates
             let buffersHash = this.Buffers.GetHashCode()
             hash (levelsHash, maxRatesHash, buffersHash)
+        
+    let buffers =
+        buffers
+        |> Array.map (fun x ->
+            x
+            |> Array.map (fun b ->
+                match b with
+                | BufferState.Empty -> BufferStateStruct.Empty
+                | BufferState.Full -> BufferStateStruct.Full
+                | BufferState.Partial -> BufferStateStruct.Partial
+                )
+            )
         
     // We now generate the random SimpleSettings we will be using
     let settings =
@@ -648,7 +685,7 @@ module AvxByteArrayEquals =
         settings
         |> Array.mapi (fun i settings -> KeyValuePair (settings, i))
         |> Dictionary 
-    
+       
         
 // Type to contain our performance tests
 type Benchmarks () =
@@ -732,20 +769,30 @@ type Benchmarks () =
         result
         
     [<Benchmark>]
-    member _.AvxFloatArrayEquals () =
+    member _.SseByteArrayEquals () =
         let mutable idx = 0
         let mutable result = 0
 
-        while idx < AvxFloatArrayEquals.settingsKeys.Length do
-            let testKey = AvxFloatArrayEquals.settingsKeys.[idx]
-            result <- AvxFloatArrayEquals.settingsDictionary.[testKey]
+        while idx < SseByteArrayEquals.settingsKeys.Length do
+            let testKey = SseByteArrayEquals.settingsKeys.[idx]
+            result <- SseByteArrayEquals.settingsDictionary.[testKey]
 
             idx <- idx + 1
 
         result
-    
-    
-    
+        
+    [<Benchmark>]
+    member _.AvxByteArrayEquals () =
+        let mutable idx = 0
+        let mutable result = 0
+
+        while idx < AvxByteArrayEquals.settingsKeys.Length do
+            let testKey = AvxByteArrayEquals.settingsKeys.[idx]
+            result <- AvxByteArrayEquals.settingsDictionary.[testKey]
+
+            idx <- idx + 1
+
+        result
     
     
 [<EntryPoint>]
@@ -753,6 +800,6 @@ let main argv =
     
     let summary = BenchmarkRunner.Run<Benchmarks>()
 //    let x = Benchmarks()
-//    x.AvxFloatArrayEquals()
+//    x.AvxByteArrayEquals()
     0
 

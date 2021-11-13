@@ -389,26 +389,24 @@ module SseFloatArrayEquals =
               i <- i - 1
         acc
           
-    let SseFloatArrayEquals (a: array<float>) (b: array<float>) =
+    let equals (a: array<float>) (b: array<float>) =
         if a.Length <> b.Length then
             invalidArg (nameof b) "Cannot check equality on arrays of different lengths"
         
         let mutable result = true
         let mutable idx = 0
-        
-        if a.Length >= Vector128<float>.Count then
-            let lastBlockIdx = a.Length - (a.Length % Vector128<float>.Count)
-            use aPointer = fixed a
-            use bPointer = fixed b
+        let lastBlockIdx = a.Length - (a.Length % Vector128<float>.Count)
+        use aPointer = fixed a
+        use bPointer = fixed b
 
-            while idx < lastBlockIdx && result do
-                let aVector = Sse2.LoadVector128 (NativePtr.add aPointer idx)
-                let bVector = Sse2.LoadVector128 (NativePtr.add bPointer idx)
-                let comparison = Sse2.CompareEqual (aVector, bVector)
-                let mask = Sse2.MoveMask comparison
-                result <- (mask = 3)
+        while idx < lastBlockIdx && result do
+            let aVector = Sse2.LoadVector128 (NativePtr.add aPointer idx)
+            let bVector = Sse2.LoadVector128 (NativePtr.add bPointer idx)
+            let comparison = Sse2.CompareEqual (aVector, bVector)
+            let mask = Sse2.MoveMask comparison
+            result <- (mask = 3)
 
-                idx <- idx + Vector128.Count
+            idx <- idx + Vector128<float>.Count
 
         while idx < a.Length && result do
             if a.[idx] <> b.[idx] then
@@ -428,8 +426,8 @@ module SseFloatArrayEquals =
         override this.Equals b =
             match b with
             | :? Settings as other ->
-                (SseFloatArrayEquals this.Levels other.Levels)
-                && (SseFloatArrayEquals this.MaxRates other.MaxRates)
+                (equals this.Levels other.Levels)
+                && (equals this.MaxRates other.MaxRates)
                 && this.Buffers = other.Buffers
             | _ -> false
             
@@ -483,25 +481,23 @@ module SseByteArrayEquals =
             invalidArg (nameof b) "Cannot perform equals on arrays of different lengths"
         
         let len = a.Length * sizeof<'T> / sizeof<byte>
-        use pointerA = fixed a
-        let bytePointerA = pointerA |> NativePtr.toNativeInt |> NativePtr.ofNativeInt<byte>
-        use pointerB = fixed b
-        let bytePointerB = pointerB |> NativePtr.toNativeInt |> NativePtr.ofNativeInt<byte>
         let mutable result = true
         let mutable idx = 0
+        let lastBlockIdx = len - (len % Vector128<byte>.Count)
+        use pointerA = fixed a
+        use pointerB = fixed b
+        let bytePointerA = pointerA |> NativePtr.toNativeInt |> NativePtr.ofNativeInt<byte>
+        let bytePointerB = pointerB |> NativePtr.toNativeInt |> NativePtr.ofNativeInt<byte>
 
-        if len > Vector128<byte>.Count then
-            let lastBlockIdx = len - (len % Vector128<byte>.Count)
+        while idx <lastBlockIdx && result do
+            let aVector = Sse2.LoadVector128 (NativePtr.add bytePointerA idx)
+            let bVector = Sse2.LoadVector128 (NativePtr.add bytePointerB idx)
 
-            while idx <lastBlockIdx && result do
-                let aVector = Sse2.LoadVector128 (NativePtr.add bytePointerA idx)
-                let bVector = Sse2.LoadVector128 (NativePtr.add bytePointerB idx)
+            let comparison = Sse2.CompareEqual (aVector, bVector)
+            let mask = Sse2.MoveMask (comparison)
 
-                let comparison = Sse2.CompareEqual (aVector, bVector)
-                let mask = Sse2.MoveMask (comparison)
-
-                result <- (mask = 65535)
-                idx <- idx + Vector128<byte>.Count
+            result <- (mask = 65535)
+            idx <- idx + Vector128<byte>.Count
 
         while idx < len && result do
             result <- ((NativePtr.get bytePointerA idx) = (NativePtr.get bytePointerB idx))
@@ -569,124 +565,8 @@ module SseByteArrayEquals =
         settings
         |> Array.mapi (fun i settings -> KeyValuePair (settings, i))
         |> Dictionary 
-    
-       
-module AvxByteArrayEquals =
 
-    let private defaultHashNodes = 18
-    let inline HashCombine nr x y = (x <<< 1) + y + 631 * nr
-    
-    let private HashFloatArray (x: array<float>) : int =
-        let len = x.Length
-        let mutable i = len - 1
-        if i > defaultHashNodes then i <- defaultHashNodes // limit the hash
-        let mutable acc = 0
-        while (i >= 0) do 
-              acc <- HashCombine i acc (int x.[i])
-              i <- i - 1
-        acc
-          
-    let private auxEquals (a: (nativeptr<byte> * int)) (b: (nativeptr<byte> * int)) =
-        let mutable result = true
-        let mutable idx = 0
-
-        let (ptrA: nativeptr<byte>, lenA : int) = a
-        let (ptrB: nativeptr<byte>, lenB : int) = b
-
-        if lenA > Vector256<byte>.Count then
-            let lastBlockIdx = lenA - (lenA % Vector256<byte>.Count)
-
-            while idx <lastBlockIdx && result do
-                let aVector = Avx2.LoadVector256 (NativePtr.add ptrA idx)
-                let bVector = Avx2.LoadVector256 (NativePtr.add ptrB idx)
-
-                let comparison = Avx2.CompareEqual (aVector, bVector)
-                let mask = Avx2.MoveMask (comparison)
-
-                result <- (mask = -1) // Two's Complement
-                idx <- idx + Vector256<byte>.Count
-
-        while idx < lenA && idx < lenB && result do
-            result <- ((NativePtr.get ptrA idx) = (NativePtr.get ptrB idx))
-            idx <- idx + 1
-
-        result
-
-
-    let private equals<'T when 'T : unmanaged> (a: array<'T>) (b: array<'T>) =
-        if (a.Length <> b.Length) then
-            false
-        else
-            let ptrA = && (a.AsSpan().GetPinnableReference()) |> NativePtr.toNativeInt |> NativePtr.ofNativeInt<byte>
-            let lenA = a.Length * sizeof<'T> / sizeof<byte>
-
-            let ptrB = && (b.AsSpan().GetPinnableReference()) |> NativePtr.toNativeInt |> NativePtr.ofNativeInt<byte>
-            let lenB = b.Length * sizeof<'T> / sizeof<byte>
-
-            auxEquals (ptrA, lenA) (ptrB, lenB)
-
-    [<Struct>]
-    type BufferStateStruct =
-        | Full
-        | Partial
-        | Empty
-      
-    [<CustomEquality; NoComparison>]
-    type Settings =
-        {
-            Levels : array<float>
-            MaxRates : array<float>
-            Buffers : array<BufferStateStruct>
-        }
-        override this.Equals b =
-            match b with
-            | :? Settings as other ->
-                (equals this.Levels other.Levels)
-                && (equals this.MaxRates other.MaxRates)
-                && (equals this.Buffers other.Buffers)
-            | _ -> false
-            
-        override this.GetHashCode () =
-            let levelsHash = HashFloatArray this.Levels
-            let maxRatesHash = HashFloatArray this.MaxRates
-            let buffersHash = this.Buffers.GetHashCode()
-            hash (levelsHash, maxRatesHash, buffersHash)
-        
-    let buffers =
-        buffers
-        |> Array.map (fun x ->
-            x
-            |> Array.map (fun b ->
-                match b with
-                | BufferState.Empty -> BufferStateStruct.Empty
-                | BufferState.Full -> BufferStateStruct.Full
-                | BufferState.Partial -> BufferStateStruct.Partial
-                )
-            )
-        
-    // We now generate the random SimpleSettings we will be using
-    let settings =
-        seq {
-            for vi in valueIndexes ->
-            {
-                Levels = levels.[vi.LevelsIdx]
-                MaxRates = maxRates.[vi.MaxRatesIdx]
-                Buffers = buffers.[vi.BufferStatesIdx]
-            }
-        } |> Array.ofSeq
-       
-    // The values we will test looking up in a Dictionary
-    let settingsKeys =
-        testIndexes
-        |> Array.map (fun idx -> settings.[idx])
-        
-    // Create the dictionary for looking up Settings
-    let settingsDictionary =
-        settings
-        |> Array.mapi (fun i settings -> KeyValuePair (settings, i))
-        |> Dictionary 
-       
-        
+   
 // Type to contain our performance tests
 type Benchmarks () =
 
@@ -776,19 +656,6 @@ type Benchmarks () =
         while idx < SseByteArrayEquals.settingsKeys.Length do
             let testKey = SseByteArrayEquals.settingsKeys.[idx]
             result <- SseByteArrayEquals.settingsDictionary.[testKey]
-
-            idx <- idx + 1
-
-        result
-        
-    [<Benchmark>]
-    member _.AvxByteArrayEquals () =
-        let mutable idx = 0
-        let mutable result = 0
-
-        while idx < AvxByteArrayEquals.settingsKeys.Length do
-            let testKey = AvxByteArrayEquals.settingsKeys.[idx]
-            result <- AvxByteArrayEquals.settingsDictionary.[testKey]
 
             idx <- idx + 1
 
